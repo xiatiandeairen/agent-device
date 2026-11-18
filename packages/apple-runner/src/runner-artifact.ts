@@ -35,6 +35,7 @@ import {
   emitRunnerXctestrunDecision,
   emitRunnerXctestrunRebuildDecision,
   evaluateExistingXctestrun,
+  readRunnerCacheGeneration,
   requireRunnerPhaseRemainingMs,
   resolveExpectedRunnerCacheMetadata,
   resolveRunnerArchBuildSettings,
@@ -464,6 +465,8 @@ export type RunnerXctestrunArtifact = {
   buildMs: number;
   xctestrunPathSource: 'manifest' | 'build' | 'external';
   reason?: string;
+  /** The certified cache generation this artifact came from; see `readRunnerCacheGeneration`. */
+  generation?: string;
 } & (
   | { cache: Exclude<RunnerXctestrunCacheKind, 'external'>; cacheKey: string }
   | { cache: 'external'; cacheKey?: string }
@@ -496,6 +499,8 @@ export async function ensureXctestrunArtifact(
   device: DeviceInfo,
   options: RunnerXctestrunBuildOptions & {
     forceRunnerXctestrunRebuild?: boolean;
+    /** Narrows a forced rebuild: a cache already rebuilt past this generation is reused. */
+    badRunnerXctestrunGeneration?: string;
   } & ExternalXctestRunnerOptions,
 ): Promise<RunnerXctestrunArtifact> {
   const external = resolveExternalXctestrunArtifact(options);
@@ -518,7 +523,10 @@ export async function ensureXctestrunArtifact(
           projectRoot,
           expectedCacheMetadata,
           derived,
-          forceRebuild: options.forceRunnerXctestrunRebuild === true,
+          rebuild: {
+            force: options.forceRunnerXctestrunRebuild === true,
+            badGeneration: options.badRunnerXctestrunGeneration,
+          },
         }),
     });
   });
@@ -591,10 +599,10 @@ async function ensureXctestrunUnderCacheLock(params: {
   projectRoot: string;
   expectedCacheMetadata: RunnerXctestrunCacheMetadata;
   derived: string;
-  forceRebuild: boolean;
+  rebuild: { force: boolean; badGeneration?: string };
 }): Promise<RunnerXctestrunArtifact> {
   const { device, options, projectRoot, expectedCacheMetadata, derived } = params;
-  cleanRunnerDerivedBeforeEvaluation(derived, params.forceRebuild);
+  cleanRunnerDerivedBeforeEvaluation(derived, params.rebuild);
   const existing = await evaluateExistingXctestrun({
     derived,
     expectedCacheMetadata,
@@ -653,6 +661,7 @@ async function resolveReusableXctestrunArtifact(params: {
     artifact: 'valid',
     buildMs: 0,
     xctestrunPathSource: 'manifest',
+    generation: readRunnerCacheGeneration(derived),
   };
 }
 
@@ -724,6 +733,7 @@ async function buildXctestrunArtifact(params: {
     buildMs,
     xctestrunPathSource: 'build',
     reason,
+    generation: readRunnerCacheGeneration(derived),
   };
 }
 

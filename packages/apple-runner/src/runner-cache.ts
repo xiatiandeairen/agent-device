@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { AppError } from '@agent-device/kernel/errors';
@@ -42,8 +43,9 @@ const RUNNER_XCTESTRUN_CACHE_LOCK_TIMEOUT_MS = 10 * 60_000;
 const RUNNER_XCTESTRUN_CACHE_LOCK_POLL_MS = 100;
 
 const BAD_ARTIFACTS_SLOT = Symbol('apple-runner-bad-artifacts');
+/** Each derived path judged bad in this run, with the generation that was judged. */
 const badRunnerArtifactsForRun = () =>
-  runnerRuntimeSlot(BAD_ARTIFACTS_SLOT, () => new Set<string>());
+  runnerRuntimeSlot(BAD_ARTIFACTS_SLOT, () => new Map<string, string | undefined>());
 
 export type RunnerXctestrunCacheKind = 'exact' | 'miss' | 'external';
 
@@ -77,6 +79,7 @@ type RunnerXctestrunArtifactIdentity = {
   cache: RunnerXctestrunCacheKind;
   derived: string;
   xctestrunPath: string;
+  generation?: string;
 };
 
 export function resolveRunnerCacheMetadataPath(derived: string): string {
@@ -107,10 +110,18 @@ export async function markRunnerXctestrunArtifactBadForRun(
     return;
   }
 
-  badRunnerArtifactsForRun().add(artifact.derived);
   await withProcessLock({
     acquire: () => acquireRunnerXctestrunCacheLock(artifact.derived),
     task: async () => {
+      if (isRunnerCacheGenerationReplaced(artifact.derived, artifact.generation)) {
+        emitRunnerXctestrunDecision('reuse', 'bad_artifact_replaced', {
+          derived: artifact.derived,
+          xctestrunPath: artifact.xctestrunPath,
+          reason,
+        });
+        return;
+      }
+      badRunnerArtifactsForRun().set(artifact.derived, artifact.generation);
       emitRunnerXctestrunDecision('clean', 'bad_artifact', {
         derived: artifact.derived,
         xctestrunPath: artifact.xctestrunPath,
@@ -143,16 +154,56 @@ function resolveRunnerXctestrunCacheLockPath(derived: string): string {
   return path.join(path.dirname(derived), `${path.basename(derived)}.lock`);
 }
 
-export function cleanRunnerDerivedBeforeEvaluation(derived: string, forceRebuild: boolean): void {
-  if (!shouldCleanDerived() && !forceRebuild && !badRunnerArtifactsForRun().has(derived)) {
-    return;
+/**
+ * Names the certified bytes a cache tree holds: a digest of its content manifest. Two builds of
+ * one key share a generation only when they produced identical bytes.
+ */
+export function readRunnerCacheGeneration(derived: string): string | undefined {
+  const artifacts = readRunnerCacheMetadata(derived)?.artifacts;
+  if (!artifacts) return undefined;
+  return crypto
+    .createHash('sha256')
+    .update(stableJsonStringify(artifacts))
+    .digest('hex')
+    .slice(0, 16);
+}
+
+/**
+ * Sessions that started from one generation judge it bad one after another, each after its own
+ * startup failure, and each would otherwise clean whatever the first one rebuilt (#4689). Read
+ * under the cache lock: a certified generation other than the one judged bad is a replacement.
+ */
+function isRunnerCacheGenerationReplaced(
+  derived: string,
+  badGeneration: string | undefined,
+): boolean {
+  if (badGeneration === undefined) return false;
+  const current = readRunnerCacheGeneration(derived);
+  return current !== undefined && current !== badGeneration;
+}
+
+/** Runs under the cache lock. A forced rebuild names the generation it judged bad, when known. */
+export function cleanRunnerDerivedBeforeEvaluation(
+  derived: string,
+  rebuild: { force: boolean; badGeneration?: string },
+): void {
+  const badArtifacts = badRunnerArtifactsForRun();
+  const judgedBad = rebuild.force || badArtifacts.has(derived);
+  if (!shouldCleanDerived()) {
+    if (!judgedBad) return;
+    const badGeneration = rebuild.force ? rebuild.badGeneration : badArtifacts.get(derived);
+    if (isRunnerCacheGenerationReplaced(derived, badGeneration)) {
+      emitRunnerXctestrunDecision('reuse', 'bad_artifact_replaced', { derived });
+      badArtifacts.delete(derived);
+      return;
+    }
   }
-  emitRunnerXctestrunDecision('clean', forceRebuild ? 'forced_rebuild' : 'forced_clean', {
+  emitRunnerXctestrunDecision('clean', rebuild.force ? 'forced_rebuild' : 'forced_clean', {
     derived,
   });
   assertSafeDerivedCleanup(derived);
   cleanRunnerDerivedArtifacts(derived);
-  badRunnerArtifactsForRun().delete(derived);
+  badArtifacts.delete(derived);
 }
 
 /**
@@ -390,6 +441,7 @@ export function emitRunnerXctestrunDecision(
     | 'reuse_ready'
     | 'forced_rebuild'
     | 'bad_artifact'
+    | 'bad_artifact_replaced'
     | 'built_new'
     | 'external_xctestrun'
     | 'external_bad_artifact'

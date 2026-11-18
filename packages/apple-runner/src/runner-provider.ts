@@ -21,6 +21,8 @@ export type AppleRunnerCommandOptions = AppleRunnerRequestOptions & {
 export type AppleRunnerLifecycleOptions = AppleRunnerCommandOptions & {
   buildTimeoutMs?: number;
   forceRunnerXctestrunRebuild?: boolean;
+  /** The generation a forced rebuild judged bad; a cache already rebuilt past it is reused. */
+  badRunnerXctestrunGeneration?: string;
   /** The session is started ahead of any command that needs it (a prewarm). */
   speculative?: boolean;
   /**

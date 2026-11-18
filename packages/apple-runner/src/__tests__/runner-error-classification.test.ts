@@ -365,18 +365,19 @@ test('a deadline on its own earns no recovery verdict', () => {
 
 // --- restored-artifact axis (shouldRebuildCachedRunnerArtifact) ---
 
-test('only a runner that never accepted a connection indicts the cached artifact', () => {
+test('only an exhausted endpoint probe indicts the cached artifact', () => {
   assert.equal(
     shouldRebuildCachedRunnerArtifact(
       runnerConnectFailure('runner_endpoint_probe_exhausted', 'Runner endpoint probe failed'),
     ),
     true,
   );
+  // A startup window that closed on a live xcodebuild is a slow boot, not a bad artifact (#4689).
   assert.equal(
     shouldRebuildCachedRunnerArtifact(
       runnerConnectFailure('runner_connect_refused', 'Runner did not accept connection'),
     ),
-    true,
+    false,
   );
   // Wiping derived data cannot fix a boot that refuses to compile.
   assert.equal(
@@ -417,12 +418,12 @@ test('a simulator service this macOS refuses to load is terminal on every recove
   );
 });
 
-test('a refused connection still restarts and rebuilds without the service-hub reason', () => {
+test('a refused connection still restarts without the service-hub reason', () => {
   // The closest negative: the same connect-shaped failure a host with a supported Xcode produces.
   const refused = unwrittenConnectRefusal();
   assert.equal(shouldRetryRunnerConnectError(refused), true);
   assert.equal(shouldRestartRunnerBeforeCommandSend(refused, TAP), true);
-  assert.equal(shouldRebuildCachedRunnerArtifact(refused), true);
+  assert.equal(shouldRebuildCachedRunnerArtifact(refused), false);
 });
 
 test('a scoped-set destination this Xcode cannot resolve is terminal on every recovery axis', () => {
@@ -536,7 +537,7 @@ test('runner_connect_refused is decided by the typed reason, not the message', (
     const error = runnerConnectFailure('runner_connect_refused', message);
     assert.equal(isRetryableRunnerError(error), true, message);
     assert.equal(shouldRetryRunnerConnectError(error), true, message);
-    assert.equal(shouldRebuildCachedRunnerArtifact(error), true, message);
+    assert.equal(shouldRebuildCachedRunnerArtifact(error), false, message);
     assert.equal(shouldRestartRunnerBeforeCommandSend(error, SNAPSHOT), true, message);
   }
   const untyped = commandFailed('Runner did not accept connection');

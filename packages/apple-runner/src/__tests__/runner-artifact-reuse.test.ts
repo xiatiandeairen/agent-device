@@ -663,6 +663,88 @@ test('ensureXctestrunArtifact stress-recovers after a bad restored artifact', as
   assert.equal(Math.ceil(Number(mockRunCmdStreaming.mock.calls[0]?.[2]?.timeoutMs) / 1e3), 300); // phase remainder (#2422)
 });
 
+/** Two prepares restored one certified generation from the same cache root. */
+async function restoreSharedGeneration(): Promise<{
+  derivedPath: string;
+  rebuildInto: (dir: string) => string;
+}> {
+  const tmpDir = await makeProjectScratchDir();
+  const derivedPath = path.join(tmpDir, 'custom-derived');
+  const productPath = path.join(derivedPath, 'Runner.app');
+  const cachedXctestrunPath = path.join(derivedPath, 'cached.xctestrun');
+  await seedRunnerProductBundle(productPath);
+  writeXctestrunFixture(cachedXctestrunPath, {
+    projectRoot: repoRoot,
+    productRelativePaths: ['Runner.app'],
+  });
+  await writeCertifiedRunnerMetadata({
+    derivedPath,
+    device: macOsDevice,
+    xctestrunPath: cachedXctestrunPath,
+    productPaths: [productPath],
+  });
+  withRunnerDerivedPathEnv(derivedPath);
+  const rebuildInto = (dir: string): string => {
+    const rebuiltXctestrunPath = path.join(derivedPath, dir, 'rebuilt.xctestrun');
+    mockRunCmdStreaming.mockImplementationOnce(async () => {
+      await seedRunnerProductBundle(path.join(derivedPath, dir, 'Runner.app'));
+      writeXctestrunFixture(rebuiltXctestrunPath, {
+        projectRoot: repoRoot,
+        productRelativePaths: ['Runner.app'],
+      });
+    });
+    return rebuiltXctestrunPath;
+  };
+  return { derivedPath, rebuildInto };
+}
+
+test('a later forced rebuild reuses the generation another prepare already rebuilt', async () => {
+  const { rebuildInto } = await restoreSharedGeneration();
+  const restoredA = await ensureXctestrunArtifact(macOsDevice, {});
+  const restoredB = await ensureXctestrunArtifact(macOsDevice, {});
+
+  // A judges the restored generation bad first and rebuilds it.
+  const rebuiltXctestrunPath = rebuildInto('rebuilt-by-a');
+  await markRunnerXctestrunArtifactBadForRun(restoredA, 'startup failed');
+  const rebuiltA = await ensureXctestrunArtifact(macOsDevice, {
+    forceRunnerXctestrunRebuild: true,
+    badRunnerXctestrunGeneration: restoredA.generation,
+  });
+  assert.equal(rebuiltA.artifact, 'rebuilt');
+
+  // B reaches the same verdict on the same restored generation afterwards (#4689).
+  await markRunnerXctestrunArtifactBadForRun(restoredB, 'startup failed');
+  assert.equal(fs.existsSync(rebuiltXctestrunPath), true);
+  const reusedB = await ensureXctestrunArtifact(macOsDevice, {
+    forceRunnerXctestrunRebuild: true,
+    badRunnerXctestrunGeneration: restoredB.generation,
+  });
+
+  assert.equal(mockRunCmdStreaming.mock.calls.length, 1);
+  assert.equal(reusedB.xctestrunPath, rebuiltXctestrunPath);
+  assert.equal(reusedB.cache, 'exact');
+  assert.ok(restoredA.generation);
+  assert.equal(restoredB.generation, restoredA.generation);
+  assert.notEqual(rebuiltA.generation, restoredA.generation);
+  assert.equal(reusedB.generation, rebuiltA.generation);
+});
+
+test('a forced rebuild still cleans the generation it judged bad', async () => {
+  const { rebuildInto } = await restoreSharedGeneration();
+  const restored = await ensureXctestrunArtifact(macOsDevice, {});
+  const rebuiltXctestrunPath = rebuildInto('rebuilt');
+
+  const rebuilt = await ensureXctestrunArtifact(macOsDevice, {
+    forceRunnerXctestrunRebuild: true,
+    badRunnerXctestrunGeneration: restored.generation,
+  });
+
+  assert.equal(mockRunCmdStreaming.mock.calls.length, 1);
+  assert.equal(fs.existsSync(restored.xctestrunPath), false);
+  assert.equal(rebuilt.xctestrunPath, rebuiltXctestrunPath);
+  assert.equal(rebuilt.artifact, 'rebuilt');
+});
+
 test('ensureXctestrunArtifact rethrows unexpected cached macOS runner repair errors', async () => {
   const { derivedPath, existingXctestrunPath } = await makeCachedRunnerXctestrun(macOsDevice);
 

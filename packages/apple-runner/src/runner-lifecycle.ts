@@ -226,6 +226,7 @@ async function recoverBadCachedRunnerArtifact(params: {
     ...options,
     cleanStaleBundles: true,
     forceRunnerXctestrunRebuild: true,
+    badRunnerXctestrunGeneration: session.xctestrunArtifact.generation,
     ...readPrepareDeadlinePhaseTimeouts(options, 'runner_rebuild'),
   });
   const connectMs = Date.now() - connectStartedAt;

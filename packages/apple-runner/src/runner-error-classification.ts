@@ -122,7 +122,7 @@ type RunnerErrorVerdicts = {
   sessionFatalReason?: string; // Invalidate cached runner session with this reason.
   restartBeforeSend?: boolean; // Restart session and replay before command was sent.
   restartAfterReadinessPreflight?: boolean; // Readiness preflight gave up before command was written.
-  artifactSuspect?: boolean; // Runner never accepted connection; restored artifact is suspect.
+  artifactSuspect?: boolean; // No endpoint had a runner; restored artifact is suspect.
   retainSession?: boolean; // Transport outage leaves current generation owned for next command.
   postSendRecovery?: boolean; // Status recovery can reach runner after lost response.
 };
@@ -380,6 +380,9 @@ export const RUNNER_ERROR_RULES: readonly RunnerErrorRule[] = [
     verdicts: { restartAfterReadinessPreflight: true },
   },
   {
+    // Says `artifactSuspect: false` on purpose: this is also how a startup window that closed on a
+    // still-alive `xcodebuild` ends, and a slow boot on a loaded host says nothing about the bytes
+    // it booted from, which the content manifest already checked before launch (#4689).
     reason: 'runner_connect_refused',
     match: {
       code: 'COMMAND_FAILED',
@@ -389,7 +392,7 @@ export const RUNNER_ERROR_RULES: readonly RunnerErrorRule[] = [
       retryable: true,
       connectRetry: true,
       restartBeforeSend: true,
-      artifactSuspect: true,
+      artifactSuspect: false,
     },
   },
   {
@@ -769,10 +772,10 @@ export function shouldRestartRunnerAfterReadinessPreflight(error: unknown): bool
 }
 
 /**
- * The runner refused or never answered on every route, which is what a restored artifact
+ * Every endpoint answered and none of them had a runner, which is what a restored artifact
  * that cannot boot looks like. Deliberately narrow: the recovery it authorises is a clean
- * `xcodebuild` rebuild, so a slow boot, a busy device or a transport failure partway
- * through a command must not pay that price.
+ * `xcodebuild` rebuild of a cache other sessions share, so a slow boot, a busy device or a
+ * transport failure partway through a command must not pay that price.
  */
 export function shouldRebuildCachedRunnerArtifact(error: unknown): boolean {
   return runnerErrorVerdict(error, 'artifactSuspect') ?? false;
